@@ -1,0 +1,7 @@
+streamlit
+PyMuPDF
+requests
+numpy
+python-dotenv
+loguru
+streamlit-pdf-viewer
