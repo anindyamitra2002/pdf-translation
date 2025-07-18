@@ -243,40 +243,107 @@ def is_long_text_block(text, min_words=10):
     """Check if text block is long enough to warrant justified alignment"""
     return len(text.split()) >= min_words
 
+def open_pdf(input_pdf):
+    logger.info("Opening PDF document...")
+    return fitz.open(input_pdf)
 
-def translate_pdf(input_pdf, output_pdf, translate_api, target_language, fontfile, S_min=6):
-    """
-    Translates text in a PDF while preserving original formatting and allowing proper text flow.
-    
-    Parameters:
-    - input_pdf (str): Path to the input PDF file.
-    - output_pdf (str): Path to save the translated PDF file.
-    - translate_api (callable): Function that translates text (e.g., translate_api(text, lang)).
-    - target_language (str): Target language code (e.g., "hi" for Hindi).
-    - fontfile (str): Path to the font file supporting the target language.
-    - S_min (float): Minimum font size to ensure readability (default: 6).
-    """
-    # Open the PDF document
-    doc = fitz.open(input_pdf)
-    
-    # Derive font name from fontfile
+def embed_font(doc, fontfile):
+    logger.info("Embedding font into PDF...")
     fontname = os.path.basename(fontfile).split("-")[0]
-    
-    # Read the font file and embed it into the document
-    try:
-        with open(fontfile, 'rb') as f:
-            font_data = f.read()
-        # Insert the font into the document
-        doc._insert_font(fontfile=fontfile, fontbuffer=font_data)
-        logger.info(f"Font '{fontname}' embedded successfully")
-        # Create font object for text width calculations
-        font = fitz.Font(fontfile=fontfile)
-    except Exception as e:
-        logger.error(f"Error embedding font: {e}")
-        doc.close()
-        return
+    with open(fontfile, 'rb') as f:
+        font_data = f.read()
+    doc._insert_font(fontfile=fontfile, fontbuffer=font_data)
+    font = fitz.Font(fontfile=fontfile)
+    logger.info(f"Font '{fontname}' embedded successfully")
+    return fontname, font
 
-    # Process each page
+def process_text_group(page, group, font, fontname, target_language, translate_api, S_min):
+    import re
+    spans = group['spans']
+    combined_bbox = group['bbox']
+    avg_size = group['avg_size']
+    avg_color = group['avg_color']
+    flags = group['flags']
+    combined_text = " ".join(span["text"].strip() for span in spans)
+    combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+    logger.debug(f"[DEBUG] Text block: {combined_text}")
+    if not combined_text:
+        return
+    translated_text = translate_api(combined_text, target_language)
+    logger.debug(f"[DEBUG] Translated text: {translated_text}")
+    translated_text = re.sub(r'\s+', ' ', translated_text).strip()
+    text_color = rgb_to_fitz_color(avg_color)
+    if sum(text_color) > 2.7:
+        text_color = (0, 0, 0)
+    last_text_box = spans[-1]
+    page_width = page.rect.width
+    alignment = detect_text_alignment(last_text_box, page_width)
+    if is_long_text_block(combined_text) and alignment == 0:
+        alignment = 3  # Justified for long text blocks
+    font_size = calculate_font_size(
+        font, translated_text,
+        combined_bbox.width, combined_bbox.height,
+        avg_size, S_min
+    )
+    alignment_css_map = {
+        0: "left",
+        1: "center",
+        2: "right",
+        3: "justify"
+    }
+    alignment_css = alignment_css_map.get(alignment, "left")
+    css_style = f"""
+    body {{
+        font-family: '{fontname}', Arial, sans-serif;
+        font-size: {font_size}px;
+        color: rgb({int(text_color[0]*255)}, {int(text_color[1]*255)}, {int(text_color[2]*255)});
+        margin: 0;
+        padding: 2px;
+        line-height: 1.2;
+        text-align: {alignment_css};
+        font-weight: normal;
+        font-style: normal;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+        white-space: pre-wrap;
+        hyphens: auto;
+        {'text-justify: inter-word;' if alignment == 3 else ''}
+        {'word-spacing: 0.1em;' if alignment == 3 else ''}
+    }}
+    """
+    page.draw_rect(combined_bbox, color=(1, 1, 1), fill=True)
+    try:
+        page.insert_htmlbox(
+            combined_bbox,
+            translated_text,
+            css=css_style,
+            scale_low=0.4,
+            overlay=True
+        )
+    except Exception as e:
+        logger.error(f"HTML insertion failed for '{combined_text[:30]}...': {e}")
+        try:
+            pymupdf_alignment = 0 if alignment == 3 else alignment
+            fit_font_size = font_size
+            for attempt in range(3):
+                rc = page.insert_textbox(
+                    combined_bbox,
+                    translated_text,
+                    fontname=fontname,
+                    fontsize=fit_font_size,
+                    color=text_color,
+                    align=pymupdf_alignment,
+                    wrap=1,
+                    border_width=0
+                )
+                if rc >= 0:
+                    break
+                fit_font_size *= 0.95
+        except Exception as e2:
+            logger.error(f"Textbox insertion failed: {e2}")
+
+def process_pages(doc, font, fontname, target_language, translate_api, S_min):
+    logger.info("Processing all pages in PDF...")
     for page_num, page in enumerate(doc):
         logger.info(f"Processing page {page_num + 1}...")
         page_rect = page.rect
@@ -284,102 +351,34 @@ def translate_pdf(input_pdf, output_pdf, translate_api, target_language, fontfil
         text_dict = page.get_text("dict")
         blocks = text_dict["blocks"]
         text_groups = group_text_spans_combined(blocks)
-
         for group in text_groups:
-            spans = group['spans']
-            combined_bbox = group['bbox']
-            avg_size = group['avg_size']
-            avg_color = group['avg_color']
-            flags = group['flags']
-            combined_text = " ".join(span["text"].strip() for span in spans)
-            combined_text = re.sub(r'\s+', ' ', combined_text).strip()
-            logger.debug(f"[DEBUG] Text block: {combined_text}")
-            if not combined_text:
-                continue
-            translated_text = translate_api(combined_text, target_language)
-            logger.debug(f"[DEBUG] Translated text: {translated_text}")
-            translated_text = re.sub(r'\s+', ' ', translated_text).strip()
-            text_color = rgb_to_fitz_color(avg_color)
-            if sum(text_color) > 2.7:
-                text_color = (0, 0, 0)
-            last_text_box = spans[-1]
-            alignment = detect_text_alignment(last_text_box, page_width)
-            if is_long_text_block(combined_text) and alignment == 0:
-                alignment = 3  # Justified for long text blocks
-            font_size = calculate_font_size(
-                font, translated_text,
-                combined_bbox.width, combined_bbox.height,
-                avg_size, S_min
-            )
-            alignment_css_map = {
-                0: "left",
-                1: "center",
-                2: "right",
-                3: "justify"
-            }
-            alignment_css = alignment_css_map.get(alignment, "left")
-            css_style = f"""
-            body {{
-                font-family: '{fontname}', Arial, sans-serif;
-                font-size: {font_size}px;
-                color: rgb({int(text_color[0]*255)}, {int(text_color[1]*255)}, {int(text_color[2]*255)});
-                margin: 0;
-                padding: 2px;
-                line-height: 1.2;
-                text-align: {alignment_css};
-                font-weight: normal;
-                font-style: normal;
-                word-wrap: break-word;
-                overflow-wrap: break-word;
-                white-space: pre-wrap;
-                hyphens: auto;
-                {'text-justify: inter-word;' if alignment == 3 else ''}
-                {'word-spacing: 0.1em;' if alignment == 3 else ''}
-            }}
-            """
-            page.draw_rect(combined_bbox, color=(1, 1, 1), fill=True)
-            try:
-                result = page.insert_htmlbox(
-                    combined_bbox,
-                    translated_text,
-                    css=css_style,
-                    scale_low=0.4,
-                    overlay=True
-                )
-            except Exception as e:
-                logger.error(f"HTML insertion failed for '{combined_text[:30]}...': {e}")
-                try:
-                    pymupdf_alignment = 0 if alignment == 3 else alignment
-                    fit_font_size = font_size
-                    for attempt in range(3):
-                        rc = page.insert_textbox(
-                            combined_bbox,
-                            translated_text,
-                            fontname=fontname,
-                            fontsize=fit_font_size,
-                            color=text_color,
-                            align=pymupdf_alignment,
-                            wrap=1,
-                            border_width=0
-                        )
-                        if rc >= 0:
-                            break
-                        fit_font_size *= 0.95
-                except Exception as e2:
-                    logger.error(f"Textbox insertion failed: {e2}")
+            process_text_group(page, group, font, fontname, target_language, translate_api, S_min)
+
+def save_pdf(doc, output_pdf):
+    logger.info("Saving translated PDF...")
+    doc.save(
+        output_pdf,
+        garbage=4,
+        clean=True,
+        deflate=True,
+        deflate_images=True,
+        deflate_fonts=True,
+        pretty=True,
+        encryption=fitz.PDF_ENCRYPT_NONE
+    )
+    logger.info(f"Translated PDF saved successfully: {output_pdf}")
+
+def translate_pdf(input_pdf, output_pdf, translate_api, target_language, fontfile, S_min=6):
+    doc = open_pdf(input_pdf)
     try:
-        # doc.save(output_pdf)
-        doc.save(
-            output_pdf,
-            garbage=4,
-            clean=True,
-            deflate=True,
-            deflate_images=True,
-            deflate_fonts=True,
-            pretty=True,
-            encryption=fitz.PDF_ENCRYPT_NONE
-        )
-        logger.info(f"Translated PDF saved successfully: {output_pdf}")
+        fontname, font = embed_font(doc, fontfile)
+    except Exception as e:
+        logger.error(f"Error embedding font: {e}")
+        doc.close()
+        return
+    process_pages(doc, font, fontname, target_language, translate_api, S_min)
+    try:
+        save_pdf(doc, output_pdf)
     except Exception as e:
         logger.error(f"Error saving PDF: {e}")
     finally:

@@ -2,8 +2,7 @@ import streamlit as st
 import tempfile
 import os
 import shutil
-from pathlib import Path
-from translate import translate_pdf, translate_api
+from translate import translate_api
 import base64
 st.markdown("""
         <style>
@@ -57,6 +56,8 @@ def displayPDF(file):
 
 st.set_page_config(page_title="PDF Translator", layout="wide")
 st.title("PDF Translator App")
+progress_bar = st.empty()  # Place progress bar just after the title
+status_text = st.empty()   # For status messages
 
 # Remove previous PDF display logic and use columns for side-by-side display
 col1, col2 = st.columns(2)
@@ -97,39 +98,45 @@ translated_pdf_ready = False
 output_pdf_path = None
 
 if start_button and uploaded_pdf_bytes:
-    with st.spinner("Translating PDF, please wait..."):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(uploaded_pdf_bytes)
-            input_pdf_path = tmp_file.name
-        font_file_path = LANG_FONT_FILES.get(target_language_code)
-        if not font_file_path or not os.path.exists(font_file_path):
-            st.error(f"Font file for language '{target_language_code}' not found: {font_file_path}")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_pdf_bytes)
+        input_pdf_path = tmp_file.name
+    font_file_path = LANG_FONT_FILES.get(target_language_code)
+    if not font_file_path or not os.path.exists(font_file_path):
+        st.error(f"Font file for language '{target_language_code}' not found: {font_file_path}")
+        output_pdf_path = None
+    else:
+        output_pdf_path = tempfile.mktemp(suffix="_translated.pdf")
+        try:
+            from translate import open_pdf, embed_font, process_pages, save_pdf
+            # Modular progress
+            total_steps = 4
+            step = 0
+            progress_bar.progress(0)
+            status_text.info("Opening PDF...")
+            doc = open_pdf(input_pdf_path)
+            step += 1
+            progress_bar.progress(int(step/total_steps*100))
+            status_text.info("Embedding font...")
+            fontname, font = embed_font(doc, font_file_path)
+            step += 1
+            progress_bar.progress(int(step/total_steps*100))
+            status_text.info("Processing pages...")
+            process_pages(doc, font, fontname, target_language_code, translate_api, 6)
+            step += 1
+            progress_bar.progress(int(step/total_steps*100))
+            status_text.info("Saving PDF...")
+            save_pdf(doc, output_pdf_path)
+            doc.close()
+            step += 1
+            progress_bar.progress(100)
+            status_text.success("Translation complete!")
+            translated_pdf_ready = True
+        except Exception as e:
+            st.error(f"Translation failed: {e}")
+            status_text.error(f"Translation failed: {e}")
             output_pdf_path = None
-        else:
-            output_pdf_path = tempfile.mktemp(suffix="_translated.pdf")
-            progress_bar = st.progress(0)
-            def progress_callback(current, total):
-                progress_bar.progress(min(int(current/total*100), 100))
-            import types
-            orig_translate_pdf = translate_pdf
-            def translate_pdf_with_progress(*args, **kwargs):
-                kwargs['progress_callback'] = progress_callback
-                return orig_translate_pdf(*args, **kwargs)
-            try:
-                translate_pdf(
-                    input_pdf_path,
-                    output_pdf_path,
-                    translate_api,
-                    target_language_code,
-                    font_file_path
-                )
-                progress_bar.progress(100)
-                st.success("Translation complete!")
-                translated_pdf_ready = True
-            except Exception as e:
-                st.error(f"Translation failed: {e}")
-                output_pdf_path = None
-                translated_pdf_ready = False
+            translated_pdf_ready = False
 else:
     translated_pdf_ready = False
 
