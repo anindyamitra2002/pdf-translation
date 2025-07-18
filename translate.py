@@ -368,7 +368,17 @@ def translate_pdf(input_pdf, output_pdf, translate_api, target_language, fontfil
                 except Exception as e2:
                     logger.error(f"Textbox insertion failed: {e2}")
     try:
-        doc.save(output_pdf)
+        # doc.save(output_pdf)
+        doc.save(
+            output_pdf,
+            garbage=4,
+            clean=True,
+            deflate=True,
+            deflate_images=True,
+            deflate_fonts=True,
+            pretty=True,
+            encryption=fitz.PDF_ENCRYPT_NONE
+        )
         logger.info(f"Translated PDF saved successfully: {output_pdf}")
     except Exception as e:
         logger.error(f"Error saving PDF: {e}")
@@ -406,5 +416,5 @@ if __name__ == "__main__":
         "PIB_DRDO_HI.pdf",
         translate_api,
         "hi",  # Target language: Hindi
-        r"Noto_Sans_Devanagari/static/NotoSansDevanagari-Regular.ttf"  # Path to static font folder
+        r"D:\Business\Sample_Set\pdf-translation\indic-fonts\NotoSansDevanagari-VariableFont_wdth,wght.ttf"  # Path to static font folder
     )

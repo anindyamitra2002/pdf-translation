@@ -4,7 +4,17 @@ import os
 import shutil
 from pathlib import Path
 from translate import translate_pdf, translate_api
-
+import base64
+st.markdown("""
+        <style>
+               .block-container {
+                    padding-top: 1rem;
+                    padding-bottom: 2 rem;
+                    padding-left: 2rem;
+                    padding-right: 2rem;
+                }
+        </style>
+        """, unsafe_allow_html=True)
 # Helper to save uploaded file to a temp location
 def save_uploaded_file(uploaded_file, suffix=""):
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
@@ -36,9 +46,19 @@ LANG_FONT_FILES = {
     "as": "indic-fonts/NotoSansBengali-VariableFont_wdth,wght.ttf",  # Assamese uses Bengali script
 }
 
+def displayPDF(file):
+    # Opening file from file path
+    with open(file, "rb") as f:
+        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+    # Embedding PDF in HTML
+    pdf_display = F'<iframe src="data:application/pdf;base64,{base64_pdf}" width="500" height="800" type="application/pdf"></iframe>'
+    # Displaying File
+    st.markdown(pdf_display, unsafe_allow_html=True)
+
 st.set_page_config(page_title="PDF Translator", layout="wide")
 st.title("PDF Translator App")
 
+# Remove previous PDF display logic and use columns for side-by-side display
 col1, col2 = st.columns(2)
 
 with st.sidebar:
@@ -66,20 +86,12 @@ uploaded_pdf_bytes = None
 if uploaded_pdf:
     uploaded_pdf_bytes = uploaded_pdf.read()
 
-# Show the original PDF first
-st.subheader("Original PDF")
+# Prepare temp files for both PDFs
+original_pdf_path = None
 if uploaded_pdf_bytes:
-    try:
-        from streamlit_pdf_viewer import pdf_viewer
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(uploaded_pdf_bytes)
-            pdf_path = tmp_file.name
-        pdf_viewer(pdf_path, width=900, height=1200)
-    except ImportError:
-        st.info("Install streamlit-pdf-viewer for inline PDF display. Download below:")
-        st.download_button("Download PDF", uploaded_pdf_bytes, file_name=uploaded_pdf.name)
-else:
-    st.info("Please upload a PDF to view it here.")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_pdf_bytes)
+        original_pdf_path = tmp_file.name
 
 translated_pdf_ready = False
 output_pdf_path = None
@@ -121,31 +133,34 @@ if start_button and uploaded_pdf_bytes:
 else:
     translated_pdf_ready = False
 
-# Show the translated PDF below the original
-st.subheader("Translated PDF")
-if output_pdf_path and os.path.exists(output_pdf_path) and os.path.getsize(output_pdf_path) > 0 and translated_pdf_ready:
-    try:
-        from streamlit_pdf_viewer import pdf_viewer
-        pdf_viewer(output_pdf_path, width=900, height=1200)
-    except ImportError:
-        with open(output_pdf_path, "rb") as f:
-            st.download_button("Download Translated PDF", f, file_name="translated.pdf")
-else:
-    st.info("The translated PDF will appear here after translation.")
+# Show PDFs side by side in columns
+with col1:
+    st.subheader("Original PDF")
+    if original_pdf_path and os.path.exists(original_pdf_path):
+        displayPDF(original_pdf_path)
+    else:
+        st.info("Please upload a PDF to view it here.")
 
-        # Clean up temp files on session end
-    @st.cache_resource
-    def cleanup_temp_files(paths):
-        for p in paths:
-            try:
-                if p and os.path.isdir(p):
-                    shutil.rmtree(p)
-                elif p and os.path.isfile(p):
-                    os.remove(p)
-            except Exception:
-                pass
-        return True
+with col2:
+    st.subheader("Translated PDF")
+    if output_pdf_path and os.path.exists(output_pdf_path):
+        displayPDF(output_pdf_path)
+    else:
+        st.info("The translated PDF will appear here after translation.")
 
-    # Only clean up if paths are defined
-    if 'input_pdf_path' in locals() and 'output_pdf_path' in locals() and input_pdf_path and output_pdf_path:
-        cleanup_temp_files([input_pdf_path, output_pdf_path]) 
+# Clean up temp files on session end
+@st.cache_resource
+def cleanup_temp_files(paths):
+    for p in paths:
+        try:
+            if p and os.path.isdir(p):
+                shutil.rmtree(p)
+            elif p and os.path.isfile(p):
+                os.remove(p)
+        except Exception:
+            pass
+    return True
+
+# Only clean up if paths are defined
+if 'original_pdf_path' in locals() and 'output_pdf_path' in locals() and original_pdf_path and output_pdf_path:
+    cleanup_temp_files([original_pdf_path, output_pdf_path]) 
