@@ -4,7 +4,11 @@ from dotenv import load_dotenv
 import requests
 import numpy as np
 import re
-from loguru import logger
+import logging
+# Setup standard logging
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger("pdf-trans")
+import time
 load_dotenv()
 
 AZURE_KEY = os.getenv("AZURE_TRANSLATOR_KEY")
@@ -245,19 +249,24 @@ def is_long_text_block(text, min_words=10):
 
 def open_pdf(input_pdf):
     logger.info("Opening PDF document...")
-    return fitz.open(input_pdf)
+    t0 = time.perf_counter()
+    doc = fitz.open(input_pdf)
+    t1 = time.perf_counter()
+    return doc, t1-t0
 
 def embed_font(doc, fontfile):
     logger.info("Embedding font into PDF...")
+    t0 = time.perf_counter()
     fontname = os.path.basename(fontfile).split("-")[0]
     with open(fontfile, 'rb') as f:
         font_data = f.read()
     doc._insert_font(fontfile=fontfile, fontbuffer=font_data)
     font = fitz.Font(fontfile=fontfile)
     logger.info(f"Font '{fontname}' embedded successfully")
-    return fontname, font
+    t1 = time.perf_counter()
+    return (fontname, font), t1-t0
 
-def process_text_group(page, group, font, fontname, target_language, translate_api, S_min):
+def process_text_group(page, group, font, fontname, target_language, translate_api, S_min, stats):
     import re
     spans = group['spans']
     combined_bbox = group['bbox']
@@ -269,9 +278,24 @@ def process_text_group(page, group, font, fontname, target_language, translate_a
     logger.debug(f"[DEBUG] Text block: {combined_text}")
     if not combined_text:
         return
+    orig_char_count = len(combined_text)
+    orig_word_count = len(combined_text.split())
+    t0 = time.perf_counter()
     translated_text = translate_api(combined_text, target_language)
+    t1 = time.perf_counter()
     logger.debug(f"[DEBUG] Translated text: {translated_text}")
     translated_text = re.sub(r'\s+', ' ', translated_text).strip()
+    trans_char_count = len(translated_text)
+    trans_word_count = len(translated_text.split())
+    stats['blocks'].append({
+        'original_text': combined_text,
+        'original_char_count': orig_char_count,
+        'original_word_count': orig_word_count,
+        'translated_text': translated_text,
+        'translated_char_count': trans_char_count,
+        'translated_word_count': trans_word_count,
+        'translation_latency': t1-t0
+    })
     text_color = rgb_to_fitz_color(avg_color)
     if sum(text_color) > 2.7:
         text_color = (0, 0, 0)
@@ -342,20 +366,24 @@ def process_text_group(page, group, font, fontname, target_language, translate_a
         except Exception as e2:
             logger.error(f"Textbox insertion failed: {e2}")
 
-def process_pages(doc, font, fontname, target_language, translate_api, S_min):
+def process_pages(doc, font, fontname, target_language, translate_api, S_min, stats):
     logger.info("Processing all pages in PDF...")
+    t0 = time.perf_counter()
     for page_num, page in enumerate(doc):
         logger.info(f"Processing page {page_num + 1}...")
         page_rect = page.rect
-        page_width = page_rect.width
+        page_width = page.rect.width
         text_dict = page.get_text("dict")
         blocks = text_dict["blocks"]
         text_groups = group_text_spans_combined(blocks)
         for group in text_groups:
-            process_text_group(page, group, font, fontname, target_language, translate_api, S_min)
+            process_text_group(page, group, font, fontname, target_language, translate_api, S_min, stats)
+    t1 = time.perf_counter()
+    return t1-t0
 
 def save_pdf(doc, output_pdf):
     logger.info("Saving translated PDF...")
+    t0 = time.perf_counter()
     doc.save(
         output_pdf,
         garbage=4,
@@ -366,23 +394,44 @@ def save_pdf(doc, output_pdf):
         pretty=True,
         encryption=fitz.PDF_ENCRYPT_NONE
     )
+    t1 = time.perf_counter()
     logger.info(f"Translated PDF saved successfully: {output_pdf}")
+    return t1-t0
 
 def translate_pdf(input_pdf, output_pdf, translate_api, target_language, fontfile, S_min=6):
-    doc = open_pdf(input_pdf)
+    pipeline_t0 = time.perf_counter()
+    stats = {'blocks': []}
+    doc, t_open = open_pdf(input_pdf)
     try:
-        fontname, font = embed_font(doc, fontfile)
+        (fontname, font), t_font = embed_font(doc, fontfile)
     except Exception as e:
         logger.error(f"Error embedding font: {e}")
         doc.close()
         return
-    process_pages(doc, font, fontname, target_language, translate_api, S_min)
+    t_pages = process_pages(doc, font, fontname, target_language, translate_api, S_min, stats)
     try:
-        save_pdf(doc, output_pdf)
+        t_save = save_pdf(doc, output_pdf)
     except Exception as e:
         logger.error(f"Error saving PDF: {e}")
+        t_save = 0
     finally:
         doc.close()
+    pipeline_t1 = time.perf_counter()
+    # Aggregate stats
+    total_orig_chars = sum(b['original_char_count'] for b in stats['blocks'])
+    total_orig_words = sum(b['original_word_count'] for b in stats['blocks'])
+    total_trans_chars = sum(b['translated_char_count'] for b in stats['blocks'])
+    total_trans_words = sum(b['translated_word_count'] for b in stats['blocks'])
+    total_blocks = len(stats['blocks'])
+    total_translation_latency = sum(b['translation_latency'] for b in stats['blocks'])
+    logger.info("\n========= PDF TRANSLATION REPORT =========")
+    logger.info(f"Total blocks translated: {total_blocks}")
+    logger.info(f"Original text: {total_orig_chars} chars, {total_orig_words} words")
+    logger.info(f"Translated text: {total_trans_chars} chars, {total_trans_words} words")
+    logger.info(f"Total translation API latency: {total_translation_latency:.2f} sec")
+    logger.info(f"Step timings (sec): open={t_open:.2f}, font={t_font:.2f}, pages={t_pages:.2f}, save={t_save:.2f}")
+    logger.info(f"Total pipeline time: {pipeline_t1-pipeline_t0:.2f} sec")
+    logger.info("==========================================\n")
 
 # Translate API function (unchanged)
 def translate_api(text: str, target_lang: str) -> str:
